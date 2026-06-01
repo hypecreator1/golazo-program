@@ -1,10 +1,16 @@
 name: build-golazo
 
-# Builds the Anchor program on a Linux runner and uploads golazo.so as an
-# artifact you can download and deploy from Windows PowerShell.
+# Reproducible (verifiable) build on a Linux runner using the pinned image with
+# Rust >= 1.85 — this is the guide's fix for the `edition2024` / blake3 error
+# that plain Solana 2.1 platform-tools (Rust 1.79) hits.
 #
-# NOTE: the repo root IS the anchor project (Anchor.toml at root), so all
-# build steps run from the repository root (no working-directory).
+# Outputs (download from the run's Artifacts):
+#   - golazo.so            (the program binary, deploy this)
+#   - golazo-keypair.json  (one-time program keypair = sets the program address;
+#                           NOT the upgrade key. Upgrade authority = treasury.)
+#   - PROGRAM_ID.txt       (the program address)
+#
+# The repo root IS the anchor project (Anchor.toml at root).
 
 on:
   push:
@@ -17,49 +23,46 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y pkg-config build-essential libudev-dev
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.85.0
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-${{ hashFiles('**/Cargo.toml') }}
+      - name: Install Rust (host, for cargo install)
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Install Solana CLI
         run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/v2.1.14/install)"
+          sh -c "$(curl -sSfL https://release.anza.xyz/v2.2.12/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
 
-      - name: Install Anchor CLI (cargo, pinned 0.31.1)
-        run: cargo install --git https://github.com/coral-xyz/anchor --tag v0.31.1 anchor-cli --locked --force
+      - name: Install solana-verify
+        run: cargo install solana-verify --locked
 
-      - name: Versions
+      - name: Generate program keypair and sync declare_id
         run: |
-          rustc --version
-          solana --version
-          anchor --version
+          mkdir -p target/deploy
+          solana-keygen new --no-bip39-passphrase -s -o target/deploy/golazo-keypair.json
+          PID="$(solana address -k target/deploy/golazo-keypair.json)"
+          echo "PROGRAM ID = $PID"
+          echo "$PID" > PROGRAM_ID.txt
+          sed -i "s/declare_id!(\"[^\"]*\")/declare_id!(\"$PID\")/" programs/golazo/src/lib.rs
+          sed -i "s/^golazo = \"[^\"]*\"/golazo = \"$PID\"/" Anchor.toml
+          echo "--- declare_id now ---"; grep declare_id programs/golazo/src/lib.rs
+          echo "--- Anchor.toml now ---"; grep "golazo =" Anchor.toml
 
       - name: Ensure Cargo.lock (pitfall #7)
         run: cargo generate-lockfile || true
 
-      - name: Anchor build
-        run: anchor build
+      - name: Verifiable build (Rust 1.85 image — fixes edition2024)
+        run: solana-verify build --library-name golazo --base-image solanafoundation/solana-verifiable-build:3.1.14
 
-      - name: Show program id baked in keypair
-        run: solana address -k target/deploy/golazo-keypair.json || true
+      - name: Locate built .so
+        run: |
+          ls -la target/deploy/ || true
+          test -f target/deploy/golazo.so && echo "golazo.so OK ($(stat -c%s target/deploy/golazo.so) bytes)" || (echo "golazo.so MISSING"; find . -name 'golazo.so' -not -path '*/node_modules/*'; exit 1)
 
-      - name: Upload .so + idl
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: golazo-program
           path: |
             target/deploy/golazo.so
-            target/idl/golazo.json
+            target/deploy/golazo-keypair.json
+            PROGRAM_ID.txt
           if-no-files-found: error
