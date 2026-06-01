@@ -3,10 +3,10 @@ use anchor_lang::solana_program::keccak;
 use anchor_lang::solana_program::pubkey; // brings the `pubkey!` macro into scope
 use anchor_spl::token::{burn, Burn, Mint, Token, TokenAccount};
 
-// Placeholder id. In SolPG this is synced automatically on Build. If you build
-// elsewhere, set declare_id == the program keypair pubkey, else every
-// instruction fails with DeclaredProgramIdMismatch (0x1004).
-declare_id!("6ggS7bxKcrYjrtFBFByS3D95a2ucydozWRCx9DNPxsLQ");
+// Deployed program id (mainnet). MUST equal the on-chain address, else every
+// instruction fails with DeclaredProgramIdMismatch (0x1004) AND a verified
+// build would mismatch (declare_id is baked into the binary).
+declare_id!("8o9XyJy6jvPfSmABmVdHyenjBFx83tTbgWziz8QMS3BC");
 
 /// SlotHashes sysvar address (on-chain entropy source). Hard-coded so the build
 /// never depends on a version-specific sysvar module path.

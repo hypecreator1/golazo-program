@@ -1,14 +1,19 @@
 name: build-golazo
 
-# Reproducible (verifiable) build on a Linux runner using the pinned image with
-# Rust >= 1.85 — this is the guide's fix for the `edition2024` / blake3 error
-# that plain Solana 2.1 platform-tools (Rust 1.79) hits.
+# Verifiable build on a Linux runner with the pinned image (Rust >= 1.85).
+#
+# declare_id is now FIXED in source to the deployed program id
+# (8o9XyJy6jvPfSmABmVdHyenjBFx83tTbgWziz8QMS3BC) — we do NOT generate a random
+# keypair anymore. This run is a REPRODUCIBILITY PRE-CHECK: it builds the program
+# and prints the executable hash so we can compare it to the deployed binary
+# hash BEFORE spending any SOL on verification.
+#
+# Expected deployed executable hash (sha256, trailing zeros stripped):
+#   1afd02ab38074395e0f514ac1124ded5ba87fae25221308fe290d75abe12ac2e
 #
 # Outputs (download from the run's Artifacts):
-#   - golazo.so            (the program binary, deploy this)
-#   - golazo-keypair.json  (one-time program keypair = sets the program address;
-#                           NOT the upgrade key. Upgrade authority = treasury.)
-#   - PROGRAM_ID.txt       (the program address)
+#   - golazo.so   (freshly built binary)
+#   - Cargo.lock  (the exact dependency lock used — commit this to pin the build)
 #
 # The repo root IS the anchor project (Anchor.toml at root).
 
@@ -16,6 +21,9 @@ on:
   push:
     branches: [main, master]
   workflow_dispatch: {}
+
+env:
+  EXPECTED_HASH: 1afd02ab38074395e0f514ac1124ded5ba87fae25221308fe290d75abe12ac2e
 
 jobs:
   build:
@@ -34,20 +42,20 @@ jobs:
       - name: Install solana-verify
         run: cargo install solana-verify --locked
 
-      - name: Generate program keypair and sync declare_id
+      - name: Confirm declare_id is the deployed id
         run: |
-          mkdir -p target/deploy
-          solana-keygen new --no-bip39-passphrase -s -o target/deploy/golazo-keypair.json
-          PID="$(solana address -k target/deploy/golazo-keypair.json)"
-          echo "PROGRAM ID = $PID"
-          echo "$PID" > PROGRAM_ID.txt
-          sed -i "s/declare_id!(\"[^\"]*\")/declare_id!(\"$PID\")/" programs/golazo/src/lib.rs
-          sed -i "s/^golazo = \"[^\"]*\"/golazo = \"$PID\"/" Anchor.toml
-          echo "--- declare_id now ---"; grep declare_id programs/golazo/src/lib.rs
-          echo "--- Anchor.toml now ---"; grep "golazo =" Anchor.toml
+          echo "--- declare_id in source ---"; grep declare_id programs/golazo/src/lib.rs
+          echo "--- Anchor.toml ---"; grep "golazo =" Anchor.toml
+          grep -q '8o9XyJy6jvPfSmABmVdHyenjBFx83tTbgWziz8QMS3BC' programs/golazo/src/lib.rs \
+            || (echo "declare_id is NOT the deployed id"; exit 1)
 
-      - name: Ensure Cargo.lock (pitfall #7)
-        run: cargo generate-lockfile || true
+      - name: Generate Cargo.lock (pin deps — pitfall #7)
+        run: |
+          cargo generate-lockfile
+          echo "--- key locked versions ---"
+          grep -A1 'name = "anchor-lang"' Cargo.lock | head -4 || true
+          grep -A1 'name = "anchor-spl"'  Cargo.lock | head -4 || true
+          grep -A1 'name = "solana-program"' Cargo.lock | head -4 || true
 
       - name: Verifiable build (Rust 1.85 image — fixes edition2024)
         run: solana-verify build --library-name golazo --base-image solanafoundation/solana-verifiable-build:3.1.14
@@ -57,12 +65,24 @@ jobs:
           ls -la target/deploy/ || true
           test -f target/deploy/golazo.so && echo "golazo.so OK ($(stat -c%s target/deploy/golazo.so) bytes)" || (echo "golazo.so MISSING"; find . -name 'golazo.so' -not -path '*/node_modules/*'; exit 1)
 
+      - name: Compute executable hash and compare to deployed
+        run: |
+          HASH="$(solana-verify get-executable-hash target/deploy/golazo.so)"
+          echo "built executable hash : $HASH"
+          echo "deployed expected hash: $EXPECTED_HASH"
+          if [ "$HASH" = "$EXPECTED_HASH" ]; then
+            echo "::notice::HASH MATCH ✅ — repo reproduces the deployed binary. Safe to verify-from-repo."
+            echo "MATCH=true" >> "$GITHUB_ENV"
+          else
+            echo "::warning::HASH MISMATCH ❌ — deployed binary not reproducible from this repo state (likely Cargo.lock deps drifted). Will need an upgrade-to-verified-binary instead."
+            echo "MATCH=false" >> "$GITHUB_ENV"
+          fi
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: golazo-program
+          name: golazo-verify
           path: |
             target/deploy/golazo.so
-            target/deploy/golazo-keypair.json
-            PROGRAM_ID.txt
+            Cargo.lock
           if-no-files-found: error
