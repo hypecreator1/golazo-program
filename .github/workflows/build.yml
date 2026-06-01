@@ -1,0 +1,51 @@
+name: build-golazo
+
+# Builds the Anchor program on a Linux runner and uploads golazo.so as an
+# artifact you can download and deploy from Windows PowerShell.
+# Also runs a reproducible (verifiable) build for the Solscan ✓ later.
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Solana CLI
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/v2.1.14/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+
+      - name: Install Anchor (avm)
+        run: |
+          cargo install --git https://github.com/coral-xyz/anchor avm --force
+          avm install 0.31.1
+          avm use 0.31.1
+
+      - name: Ensure Cargo.lock (pitfall #7)
+        working-directory: chain/program
+        run: cargo generate-lockfile || true
+
+      - name: Anchor build
+        working-directory: chain/program
+        run: anchor build
+
+      - name: Show program id baked in keypair
+        working-directory: chain/program
+        run: solana address -k target/deploy/golazo-keypair.json || true
+
+      - name: Upload .so + idl
+        uses: actions/upload-artifact@v4
+        with:
+          name: golazo-program
+          path: |
+            chain/program/target/deploy/golazo.so
+            chain/program/target/idl/golazo.json
+          if-no-files-found: error
